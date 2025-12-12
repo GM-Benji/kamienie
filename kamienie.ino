@@ -16,8 +16,8 @@ float Ki = 0.0;
 float Kd = 0.0;
 
 // Osobne prędkości zadane dla kół
-float predkoscZadanaL = 200.0; 
-float predkoscZadanaR = 200.0;
+float predkoscZadanaL = 100.0; 
+float predkoscZadanaR = 100.0;
 
 // --- ZMIENNE POMIAROWE (LEWA STRONA) ---
 volatile uint32_t czas_ost_impulsu_L = 0;
@@ -135,10 +135,12 @@ void loop() {
     prev_e_R = e_R;
 
     // 6. Wykres (Format: ZadanaL MierzonaL ZadanaR MierzonaR)
+    Serial.print(0);Serial.print(" ");
     Serial.print(predkoscZadanaL); Serial.print(" ");
     Serial.print(aktualna_L);      Serial.print(" ");
     Serial.print(predkoscZadanaR); Serial.print(" ");
     Serial.println(aktualna_R);
+    
   }
 }
 
