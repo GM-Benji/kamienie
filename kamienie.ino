@@ -1,63 +1,76 @@
 #include <stdint.h>
 
-const uint8_t PWM_PIN = 9;
-const uint8_t ENCODER_PIN = 2;
+// --- KONFIGURACJA PINÓW ---
+const uint8_t LEWY_PWM_PIN = 5;      // Silnik lewy
+const uint8_t PRAWY_PWM_PIN = 6;     // Silnik prawy
+const uint8_t LEWY_ENCODER_PIN = 2;  // Lewy enkoder
+const uint8_t PRAWY_ENCODER_PIN = 3; // Prawy enkoder
+
 const float WSPOLCZYNNIK = 4114.28;
 
+// --- ZMIENNE PID ---
+// Wspólne nastawy (Kp, Ki, Kd) dla uproszczenia,
+// ale dobierane na podstawie średniej prędkości
 float Kp = 0.0;
 float Ki = 0.0;
 float Kd = 0.0;
-float predkoscZadana = 30.0;
 
-volatile uint32_t czas_ost_impulsu = 0;
-volatile uint16_t pomiary[4] = {0};
-volatile uint8_t numer = 0;
+// Osobne prędkości zadane dla kół
+float predkoscZadanaL = 200.0; 
+float predkoscZadanaR = 200.0;
 
-float predkoscMierzona();
-void przerwanie();
+// --- ZMIENNE POMIAROWE (LEWA STRONA) ---
+volatile uint32_t czas_ost_impulsu_L = 0;
+volatile uint16_t pomiary_L[4] = {0};
+volatile uint8_t numer_L = 0;
+
+// --- ZMIENNE POMIAROWE (PRAWA STRONA) ---
+volatile uint32_t czas_ost_impulsu_R = 0;
+volatile uint16_t pomiary_R[4] = {0};
+volatile uint8_t numer_R = 0;
+
+// Deklaracje funkcji
+float predkoscMierzonaLewa();
+float predkoscMierzonaPrawa();
+void przerwanieLewe();
+void przerwaniePrawe();
 
 void setup() {
-  pinMode(PWM_PIN, OUTPUT);
-  pinMode(ENCODER_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), przerwanie, CHANGE);
+  pinMode(LEWY_PWM_PIN, OUTPUT);
+  pinMode(PRAWY_PWM_PIN, OUTPUT);
+  
+  pinMode(LEWY_ENCODER_PIN, INPUT_PULLUP);
+  pinMode(PRAWY_ENCODER_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(LEWY_ENCODER_PIN), przerwanieLewe, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PRAWY_ENCODER_PIN), przerwaniePrawe, CHANGE);
+  
   Serial.begin(9600);
 }
 
 void loop() {
-  static uint32_t timer_sekwencji = 0;
-  static uint8_t etap = 0;
-
-  if (millis() - timer_sekwencji > 4000) {
-    timer_sekwencji = millis();
-    etap++;
-    if (etap > 5) etap = 0;
-
-    switch(etap) {
-      case 0: predkoscZadana = 30.0; break;
-      case 1: predkoscZadana = 100.0; break;
-      case 2: predkoscZadana = 20.0; break;
-      case 3: predkoscZadana = 40.0; break;
-      case 4: predkoscZadana = 120.0; break;
-      case 5: predkoscZadana = 70.0; break;
-
-
-    }
-  }
-
+  // Usunięto sekwencję testową (zmianę prędkości w czasie)
+  
+  // --- REGULATOR PID (cykl 10ms) ---
   static uint32_t last_pid = 0;
   if (millis() - last_pid >= 10) {
     last_pid = millis();
 
-    // Deklaracja zmiennych pamięci regulatora przeniesiona na górę bloku,
-    // aby można było zresetować sum_e w sekcji doboru parametrów.
-    static float sum_e = 0;
-    static float prev_e = 0;
-    static float pid_raw = 0;
+    // Pamięć regulatorów
+    static float sum_e_L = 0;
+    static float prev_e_L = 0;
+    static float pid_raw_L = 0;
 
-    // 1. Dobór parametrów (Gain Scheduling) z wykrywaniem zmiany
-    float stare_Ki = Ki; // Zapamiętaj poprzednie Kp
+    static float sum_e_R = 0;
+    static float prev_e_R = 0;
+    static float pid_raw_R = 0;
 
-    if (predkoscZadana <= 50.0) {
+    // 1. Dobór parametrów (Gain Scheduling)
+    // Decyzja na podstawie średniej prędkości obu kół
+    float srednia_zadana = (predkoscZadanaL + predkoscZadanaR) / 2.0;
+    float stare_Ki = Ki;
+
+    if (srednia_zadana <= 50.0) {
       Kp = 0.7;
       Ki = 0.1;
       Kd = 0.7;
@@ -67,55 +80,114 @@ void loop() {
       Kd = 0.8;
     }
 
-    // Jeśli Kp uległo zmianie (zmieniliśmy tryb), zerujemy całkę
+    // Reset całki przy zmianie parametrów
     if (stare_Ki != Ki) {
-      sum_e = 0;
+      sum_e_L = 0;
+      sum_e_R = 0;
     }
 
-    // 2. Pomiary i uchyb
-    float aktualna = predkoscMierzona();
-    float e = predkoscZadana - aktualna;
+    // ================= LEWY SILNIK =================
+    float aktualna_L = predkoscMierzonaLewa();
+    float e_L = predkoscZadanaL - aktualna_L;
     
-    // 3. Anti-windup
-    bool nasycenie = (pid_raw >= 255.0 && e > 0) || (pid_raw <= 50.0 && e < 0);
-    if (!nasycenie) sum_e += e;
+    // Anti-windup Lewy (Limit 200 zamiast 255)
+    bool nasycenie_L = (pid_raw_L >= 200.0 && e_L > 0) || (pid_raw_L <= 50.0 && e_L < 0);
+    if (!nasycenie_L) sum_e_L += e_L;
 
-    // 4. Obliczenie PID
-    float P = Kp * e;
-    float I = Ki * sum_e;
-    float D = Kd * (e - prev_e);
-    pid_raw = P + I + D;
-    uint8_t pwm;
-    // 5. Wykonanie
-    if (predkoscZadana>0) {
-    pwm= (uint8_t)constrain(pid_raw, 60, 255);
-    }
-    else {
-    pwm =0;
-    }
+    // PID Lewy
+    float P_L = Kp * e_L;
+    float I_L = Ki * sum_e_L;
+    float D_L = Kd * (e_L - prev_e_L);
+    pid_raw_L = P_L + I_L + D_L;
     
-    analogWrite(PWM_PIN, pwm);
-    prev_e = e;
+    uint8_t pwm_L = 0;
+    if (predkoscZadanaL > 0) {
+      // Ograniczenie PWM do 200
+      pwm_L = (uint8_t)constrain(pid_raw_L, 60, 200);
+    } else {
+      pwm_L = 0;
+    }
+    analogWrite(LEWY_PWM_PIN, pwm_L);
+    prev_e_L = e_L;
 
-    // 6. Wykres
-    Serial.print(0); Serial.print(" ");
-    Serial.print(predkoscZadana); Serial.print(" ");
-    Serial.println(aktualna);
+    // ================= PRAWY SILNIK =================
+    float aktualna_R = predkoscMierzonaPrawa();
+    float e_R = predkoscZadanaR - aktualna_R;
+    
+    // Anti-windup Prawy (Limit 200 zamiast 255)
+    bool nasycenie_R = (pid_raw_R >= 200.0 && e_R > 0) || (pid_raw_R <= 50.0 && e_R < 0);
+    if (!nasycenie_R) sum_e_R += e_R;
+
+    // PID Prawy
+    float P_R = Kp * e_R;
+    float I_R = Ki * sum_e_R;
+    float D_R = Kd * (e_R - prev_e_R);
+    pid_raw_R = P_R + I_R + D_R;
+    
+    uint8_t pwm_R = 0;
+    if (predkoscZadanaR > 0) {
+      // Ograniczenie PWM do 200
+      pwm_R = (uint8_t)constrain(pid_raw_R, 60, 200);
+    } else {
+      pwm_R = 0;
+    }
+    analogWrite(PRAWY_PWM_PIN, pwm_R);
+    prev_e_R = e_R;
+
+    // 6. Wykres (Format: ZadanaL MierzonaL ZadanaR MierzonaR)
+    Serial.print(predkoscZadanaL); Serial.print(" ");
+    Serial.print(aktualna_L);      Serial.print(" ");
+    Serial.print(predkoscZadanaR); Serial.print(" ");
+    Serial.println(aktualna_R);
   }
 }
 
-void przerwanie() {
+// --- OBSŁUGA PRZERWAŃ ---
+
+void przerwanieLewe() {
   uint32_t now = millis();
-  pomiary[numer] = (uint16_t)(now - czas_ost_impulsu);
-  czas_ost_impulsu = now;
-  numer++; if (numer > 3) numer = 0;
+  pomiary_L[numer_L] = (uint16_t)(now - czas_ost_impulsu_L);
+  czas_ost_impulsu_L = now;
+  numer_L++; if (numer_L > 3) numer_L = 0;
 }
 
-float predkoscMierzona() {
+void przerwaniePrawe() {
   uint32_t now = millis();
-  noInterrupts(); uint32_t last = czas_ost_impulsu; interrupts();
+  pomiary_R[numer_R] = (uint16_t)(now - czas_ost_impulsu_R);
+  czas_ost_impulsu_R = now;
+  numer_R++; if (numer_R > 3) numer_R = 0;
+}
+
+// --- FUNKCJE POMIAROWE ---
+
+float predkoscMierzonaLewa() {
+  uint32_t now = millis();
+  noInterrupts();
+  uint32_t last = czas_ost_impulsu_L; 
+  interrupts();
+  
   if (now - last > 300) return 0.0;
+  
   float suma = 0;
-  noInterrupts(); for(uint8_t i=0; i<4; i++) suma += pomiary[i]; interrupts();
+  noInterrupts();
+  for(uint8_t i=0; i<4; i++) suma += pomiary_L[i]; 
+  interrupts();
+  
+  return (suma == 0) ? 0.0 : (WSPOLCZYNNIK / suma);
+}
+
+float predkoscMierzonaPrawa() {
+  uint32_t now = millis();
+  noInterrupts();
+  uint32_t last = czas_ost_impulsu_R; 
+  interrupts();
+  
+  if (now - last > 300) return 0.0;
+  
+  float suma = 0;
+  noInterrupts();
+  for(uint8_t i=0; i<4; i++) suma += pomiary_R[i]; 
+  interrupts();
+  
   return (suma == 0) ? 0.0 : (WSPOLCZYNNIK / suma);
 }
